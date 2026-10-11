@@ -22,16 +22,29 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
-      - name: Find project folder
+      - name: Unzip project and add models
         id: proj
         run: |
-          f=$(find . -name settings.gradle.kts | head -n 1)
+          base="."
+          z=$(find . -maxdepth 1 -name '*.zip' -print -quit)
+          if [ -n "$z" ]; then
+            mkdir -p _project
+            unzip -q "$z" -d _project
+            base="_project"
+          fi
+          f=$(find "$base" -name settings.gradle.kts | head -n 1)
           if [ -z "$f" ]; then
-            echo "settings.gradle.kts পাওয়া যায়নি। প্রজেক্ট ফাইল আপলোড হয়নি।"
+            echo "settings.gradle.kts পাওয়া যায়নি।"
             ls -R | head -60
             exit 1
           fi
-          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
+          dir=$(dirname "$f")
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          mkdir -p "$dir/app/src/main/assets/models"
+          if [ -f realesr-general-x4v3.onnx ]; then cp realesr-general-x4v3.onnx "$dir/app/src/main/assets/models/image_model.onnx"; fi
+          if [ -f image_model.onnx ]; then cp image_model.onnx "$dir/app/src/main/assets/models/image_model.onnx"; fi
+          if [ -f face_model.onnx ]; then cp face_model.onnx "$dir/app/src/main/assets/models/face_model.onnx"; fi
+          ls -la "$dir/app/src/main/assets/models"
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Create debug keystore
