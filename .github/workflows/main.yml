@@ -22,19 +22,32 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
+      - name: Find project folder
+        id: proj
+        run: |
+          f=$(find . -name settings.gradle.kts | head -n 1)
+          if [ -z "$f" ]; then
+            echo "settings.gradle.kts পাওয়া যায়নি। প্রজেক্ট ফাইল আপলোড হয়নি।"
+            ls -R | head -60
+            exit 1
+          fi
+          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Create debug keystore
+        working-directory: ${{ steps.proj.outputs.dir }}
         run: keytool -genkeypair -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
       - name: Build debug APK
+        working-directory: ${{ steps.proj.outputs.dir }}
         run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: lamini-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk
       - name: Publish APK to Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/*.apk lamini-build-${{ github.run_number }}.apk
+          APK=$(ls ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk | head -n 1)
+          cp "$APK" lamini-build-${{ github.run_number }}.apk
           gh release create "build-${{ github.run_number }}" "lamini-build-${{ github.run_number }}.apk" --title "Build ${{ github.run_number }}" --notes "Auto-built debug APK" --target "${{ github.sha }}"
