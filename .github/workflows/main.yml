@@ -1,4 +1,5 @@
-name: Build APK
+name: Build Android APK
+
 on:
   push:
   workflow_dispatch:
@@ -6,61 +7,124 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 9.3.1
-      - name: Unzip project and add models
-        id: proj
+          java-version: "21"
+
+      - name: Find project (auto unzip if needed)
         run: |
-          base="."
-          z=$(find . -maxdepth 1 -name '*.zip' -print -quit)
-          if [ -n "$z" ]; then
-            mkdir -p _project
-            unzip -q "$z" -d _project
-            base="_project"
+          find_settings() {
+            find . -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+              -not -path "./.git/*" -not -path "*/node_modules/*" 2>/dev/null \
+              | awk '{ print length, $0 }' | sort -n | head -1 | cut -d' ' -f2-
+          }
+
+          SETTINGS="$(find_settings)"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "settings.gradle পাওয়া যায়নি — zip ফাইল খোঁজা হচ্ছে..."
+            find . -type f -iname "*.zip" -not -path "./.git/*" | while read -r z; do
+              d="_extracted/$(basename "$z" .zip)"
+              mkdir -p "$d"
+              unzip -o -q "$z" -d "$d" || true
+              echo "Extracted: $z"
+            done
+            SETTINGS="$(find_settings)"
           fi
-          f=$(find "$base" -name settings.gradle.kts | head -n 1)
-          if [ -z "$f" ]; then
-            echo "settings.gradle.kts পাওয়া যায়নি।"
-            ls -R | head -60
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::কোনো Android/Gradle প্রজেক্ট পাওয়া যায়নি (settings.gradle.kts নেই)।"
             exit 1
           fi
-          dir=$(dirname "$f")
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-          mkdir -p "$dir/app/src/main/assets/models"
-          if [ -f realesr-general-x4v3.onnx ]; then cp realesr-general-x4v3.onnx "$dir/app/src/main/assets/models/image_model.onnx"; fi
-          if [ -f image_model.onnx ]; then cp image_model.onnx "$dir/app/src/main/assets/models/image_model.onnx"; fi
-          if [ -f face_model.onnx ]; then cp face_model.onnx "$dir/app/src/main/assets/models/face_model.onnx"; fi
-          ls -la "$dir/app/src/main/assets/models"
-      - name: Accept Android licenses
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-      - name: Create debug keystore
-        working-directory: ${{ steps.proj.outputs.dir }}
-        run: keytool -genkeypair -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-      - name: Build debug APK
-        working-directory: ${{ steps.proj.outputs.dir }}
-        run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: lamini-apk
-          path: ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk
-      - name: Publish APK to Releases
-        env:
-          GH_TOKEN: ${{ github.token }}
+
+          PROJECT_DIR="$(cd "$(dirname "$SETTINGS")" && pwd)"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project found at: $PROJECT_DIR"
+
+      - name: Accept Android SDK licenses
         run: |
-          APK=$(ls ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk | head -n 1)
-          cp "$APK" lamini-build-${{ github.run_number }}.apk
-          gh release create "build-${{ github.run_number }}" "lamini-build-${{ github.run_number }}.apk" --title "Build ${{ github.run_number }}" --notes "Auto-built debug APK" --target "${{ github.sha }}"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Generate signing keystores
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -keystore debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          if [ ! -f my-upload-key.jks ]; then
+            keytool -genkeypair -keystore my-upload-key.jks \
+              -storepass android123 -keypass android123 \
+              -alias upload -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Upload,O=App,C=BD"
+          fi
+
+      - name: Setup Gradle
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            chmod +x gradlew
+            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
+          else
+            URL=""
+            if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
+              URL="$(grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties | cut -d= -f2- | tr -d '\\\r')"
+            fi
+            [ -z "$URL" ] && URL="https://services.gradle.org/distributions/gradle-9.3.1-bin.zip"
+            echo "Downloading Gradle: $URL"
+            curl -fsSL "$URL" -o "$RUNNER_TEMP/gradle.zip"
+            unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-dist"
+            GRADLE_BIN="$(find "$RUNNER_TEMP/gradle-dist" -type f -path "*/bin/gradle" | head -1)"
+            chmod +x "$GRADLE_BIN"
+            echo "GRADLE_CMD=$GRADLE_BIN" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: $GRADLE_CMD assembleDebug --stacktrace --no-daemon
+
+      - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        continue-on-error: true
+        env:
+          KEYSTORE_PATH: ${{ env.PROJECT_DIR }}/my-upload-key.jks
+          STORE_PASSWORD: android123
+          KEY_PASSWORD: android123
+        run: $GRADLE_CMD assembleRelease --stacktrace --no-daemon
+
+      - name: Upload APK (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-apk
+          path: "**/build/outputs/apk/**/*.apk"
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: APK Build #${{ github.run_number }}
+          files: "**/build/outputs/apk/**/*.apk"
