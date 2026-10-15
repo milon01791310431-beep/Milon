@@ -33,24 +33,21 @@ jobs:
           SETTINGS="$(find_settings)"
 
           if [ -z "$SETTINGS" ]; then
-            echo "settings.gradle পাওয়া যায়নি — zip ফাইল খোঁজা হচ্ছে..."
             find . -type f -iname "*.zip" -not -path "./.git/*" | while read -r z; do
               d="_extracted/$(basename "$z" .zip)"
               mkdir -p "$d"
               unzip -o -q "$z" -d "$d" || true
-              echo "Extracted: $z"
             done
             SETTINGS="$(find_settings)"
           fi
 
           if [ -z "$SETTINGS" ]; then
-            echo "::error::কোনো Android/Gradle প্রজেক্ট পাওয়া যায়নি (settings.gradle.kts নেই)।"
+            echo "::error::কোনো Android/Gradle প্রজেক্ট পাওয়া যায়নি"
             exit 1
           fi
 
           PROJECT_DIR="$(cd "$(dirname "$SETTINGS")" && pwd)"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project found at: $PROJECT_DIR"
 
       - name: Accept Android SDK licenses
         run: |
@@ -84,7 +81,6 @@ jobs:
               URL="$(grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties | cut -d= -f2- | tr -d '\\\r')"
             fi
             [ -z "$URL" ] && URL="https://services.gradle.org/distributions/gradle-9.3.1-bin.zip"
-            echo "Downloading Gradle: $URL"
             curl -fsSL "$URL" -o "$RUNNER_TEMP/gradle.zip"
             unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-dist"
             GRADLE_BIN="$(find "$RUNNER_TEMP/gradle-dist" -type f -path "*/bin/gradle" | head -1)"
@@ -106,20 +102,11 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: $GRADLE_CMD assembleDebug --stacktrace --no-daemon
 
-      - name: Build Release APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        continue-on-error: true
-        env:
-          KEYSTORE_PATH: ${{ env.PROJECT_DIR }}/my-upload-key.jks
-          STORE_PASSWORD: android123
-          KEY_PASSWORD: android123
-        run: $GRADLE_CMD assembleRelease --stacktrace --no-daemon
-
       - name: Upload APK (Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: app-apk
-          path: "**/build/outputs/apk/**/*.apk"
+          name: app-debug-apk
+          path: "**/build/outputs/apk/debug/*.apk"
           if-no-files-found: error
 
       - name: Publish GitHub Release
@@ -127,4 +114,4 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: APK Build #${{ github.run_number }}
-          files: "**/build/outputs/apk/**/*.apk"
+          files: "**/build/outputs/apk/debug/*.apk"
