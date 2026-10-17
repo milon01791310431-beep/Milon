@@ -2,6 +2,7 @@ name: Build APK from ZIP
 
 on:
   push:
+    branches: [main, master]
     paths:
       - '**.zip'
       - '.github/workflows/**'
@@ -77,3 +78,10 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Releases-এ APK রাখা (ZIP ছাড়া সরাসরি ডাউনলোড)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Surokar v1.0.${{ github.run_number }}
+          files: dist/*.apk
