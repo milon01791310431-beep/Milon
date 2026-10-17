@@ -1,117 +1,79 @@
-name: Build Android APK
+name: Build APK from ZIP
 
 on:
   push:
+    paths:
+      - '**.zip'
+      - '.github/workflows/**'
   workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
+env:
+  APP_NAME: Surokar
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Find project (auto unzip if needed)
+      - name: ZIP খুলে প্রজেক্ট বের করা
         run: |
-          find_settings() {
-            find . -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
-              -not -path "./.git/*" -not -path "*/node_modules/*" 2>/dev/null \
-              | awk '{ print length, $0 }' | sort -n | head -1 | cut -d' ' -f2-
-          }
-
-          SETTINGS="$(find_settings)"
-
-          if [ -z "$SETTINGS" ]; then
-            find . -type f -iname "*.zip" -not -path "./.git/*" | while read -r z; do
-              d="_extracted/$(basename "$z" .zip)"
-              mkdir -p "$d"
-              unzip -o -q "$z" -d "$d" || true
-            done
-            SETTINGS="$(find_settings)"
-          fi
-
-          if [ -z "$SETTINGS" ]; then
-            echo "::error::কোনো Android/Gradle প্রজেক্ট পাওয়া যায়নি"
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "::error::রিপোর মূল ফোল্ডারে কোনো .zip ফাইল নেই। প্রজেক্টের ZIP আপলোড করো।"
             exit 1
           fi
-
-          PROJECT_DIR="$(cd "$(dirname "$SETTINGS")" && pwd)"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      - name: Accept Android SDK licenses
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-
-      - name: Generate signing keystores
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          if [ ! -f debug.keystore ]; then
-            keytool -genkeypair -keystore debug.keystore \
-              -storepass android -keypass android \
-              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+          echo "ব্যবহার হচ্ছে: ${zips[0]}"
+          mkdir -p "$GITHUB_WORKSPACE/_project"
+          unzip -q -o "${zips[0]}" -d "$GITHUB_WORKSPACE/_project"
+          SETTINGS=$(find "$GITHUB_WORKSPACE/_project" -maxdepth 3 \( -name settings.gradle -o -name settings.gradle.kts \) | head -n1)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::ZIP-এর ভেতরে settings.gradle পাওয়া যায়নি"
+            exit 1
           fi
-          if [ ! -f my-upload-key.jks ]; then
-            keytool -genkeypair -keystore my-upload-key.jks \
-              -storepass android123 -keypass android123 \
-              -alias upload -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Upload,O=App,C=BD"
-          fi
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
 
-      - name: Setup Gradle
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
-            chmod +x gradlew
-            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
-          else
-            URL=""
-            if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
-              URL="$(grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties | cut -d= -f2- | tr -d '\\\r')"
-            fi
-            [ -z "$URL" ] && URL="https://services.gradle.org/distributions/gradle-9.3.1-bin.zip"
-            curl -fsSL "$URL" -o "$RUNNER_TEMP/gradle.zip"
-            unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-dist"
-            GRADLE_BIN="$(find "$RUNNER_TEMP/gradle-dist" -type f -path "*/bin/gradle" | head -1)"
-            chmod +x "$GRADLE_BIN"
-            echo "GRADLE_CMD=$GRADLE_BIN" >> "$GITHUB_ENV"
-          fi
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
+      - uses: actions/setup-java@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          distribution: temurin
+          java-version: '17'
 
-      - name: Build Debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: $GRADLE_CMD assembleDebug --stacktrace --no-daemon
-
-      - name: Upload APK (Artifacts)
-        uses: actions/upload-artifact@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          name: app-debug-apk
-          path: "**/build/outputs/apk/debug/*.apk"
+          gradle-version: '8.7'
+
+      - name: ভার্সন ঠিক করা
+        run: |
+          echo "VERSION_NAME=1.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Debug APK বানানো
+        run: gradle -p "$PROJECT_DIR" assembleDebug --stacktrace
+
+      - name: APK গুছিয়ে রাখা
+        run: |
+          mkdir -p dist
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" "dist/${APP_NAME}-v${VERSION_NAME}.apk"
+          {
+            echo "## ✅ ${APP_NAME} APK তৈরি হয়েছে"
+            echo ""
+            echo "| ফাইল | সাইজ |"
+            echo "|---|---|"
+            for f in dist/*.apk; do echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-apk
+          path: dist/*.apk
           if-no-files-found: error
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: APK Build #${{ github.run_number }}
-          files: "**/build/outputs/apk/debug/*.apk"
+          retention-days: 30
